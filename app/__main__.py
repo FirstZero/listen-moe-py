@@ -1,28 +1,12 @@
-import gi
-gi.require_version('Gst', '1.0')
-gi.require_version('GstBase', '1.0')
-from gi.repository import Gst, GstBase, GObject
-
-from PyQt5.Qt import QApplication, QSystemTrayIcon, QMenu, QAction, QIcon, QStyle, QEvent, QThread, pyqtSignal, QWaitCondition, QMutex
+from threading import Thread
+from time import sleep
+from PyQt5.Qt import QApplication, QSystemTrayIcon, QMenu, QAction, QIcon, QStyle, QEvent, QThread, pyqtSignal, QWaitCondition, QMutex, QUrl
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
 import sys, websocket, json
 
 class WebStreamPlayer:
-    def __init__(self):
-        Gst.init(None)
-
-        self.url = 'https://listen.moe/stream'
-
-        self.player = Gst.ElementFactory.make('playbin', 'player')
-        self.player.set_property('uri', self.url)
-
-        self.player.set_state(Gst.State.READY)
-
-    def play(self):
-        self.player.set_state(Gst.State.PLAYING)
-
-    def stop(self):
-        self.player.set_state(Gst.State.READY)
+    pass
 
 class InfoSocketNotification(QThread):
     def __init__(self, tray_icon):
@@ -31,16 +15,35 @@ class InfoSocketNotification(QThread):
         self.mutex = QMutex()
     def __del__(self):
         self.wait()
-    def run(self):
-        wss = websocket.create_connection('wss://listen.moe/api/v2/socket')
+
+
+    def _send_ws(self, wsapp, data):
+        json_data = json.dumps(data)
+        wsapp.send(json_data)
+
+    def _send_pings(self, wsapp, interval=30):
         while True:
-            self.mutex.lock()
-            if not self.tray_icon.isPlaying: self.tray_icon.notificationWaitCondition.wait(self.mutex)
-            data = wss.recv()
-            if data != '':
-                info = json.loads(data)
-                self.tray_icon.new_song_notification_sent.emit(info)
-            self.mutex.unlock()
+            sleep(30)
+            print('sent ping')
+            msg = { 'op': 9 }
+            self._send_ws(wsapp, msg)
+
+    def _on_message(self, wsapp, msg):
+            data = json.loads(msg)
+            if data['op'] == 0:
+                print('0')
+                heartbeat = data['d']['heartbeat'] / 1000
+                thread = Thread(target=self._send_pings, args=(wsapp, heartbeat))
+                thread.daemon = True
+                thread.start()
+            elif data['op'] == 1:
+                print('1')
+                self.tray_icon.new_song_notification_sent.emit(data)
+    def run(self):
+        self.mutex.lock()
+        wss = websocket.WebSocketApp('wss://listen.moe/gateway_v2', on_message=self._on_message)
+        wss.run_forever()
+        self.mutex.unlock()
 
 class TrayIcon(QSystemTrayIcon):
     new_song_notification_sent = pyqtSignal([dict])
@@ -49,10 +52,14 @@ class TrayIcon(QSystemTrayIcon):
     def __init__(self, icon, parent=None):
         QSystemTrayIcon.__init__(self, icon, parent)
         self.notificationWaitCondition = QWaitCondition()
-        self.player = WebStreamPlayer()
+        self.player = QMediaPlayer()
         self.notification = InfoSocketNotification(self)
         self.notification.start()
         self.isPlaying = False
+
+        self.player.setMedia(QMediaContent(QUrl('https://listen.moe/fallback')))
+        self.player.setVolume(20)
+        self.player.play()
 
         self.menu = QMenu(parent)
         playAction = self.menu.addAction('Play')
@@ -72,7 +79,6 @@ class TrayIcon(QSystemTrayIcon):
         if self.isPlaying:
             self.player.play()
             self.notificationWaitCondition.wakeAll()
-
         else:
             self.player.stop()
 
@@ -90,12 +96,12 @@ class TrayIcon(QSystemTrayIcon):
             self.player_state_changed.emit()
 
     def handle_new_song_notification_sent(self, info):
-        song_name = info['song_name']
-        artist_name = 'Artist: ' + info['artist_name']
-        anime_name = '\nAnime: ' + info['anime_name']
+        song_name = info['d']['song']['title']
+        artist_name = 'Artist: ' + info['d']['song']['artists'][0]['name']
+        #anime_name = '\nAnime: ' + info['anime_name']
         info_body = artist_name;
-        if info['anime_name'] != '': info_body = info_body + anime_name
-        self.showMessage(song_name, info_body,QSystemTrayIcon.Information, 5000)
+        #if info['anime_name'] != '': info_body = info_body
+        self.showMessage(song_name, info_body, QSystemTrayIcon.Information, 5000)
 
 
 
